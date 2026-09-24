@@ -1,0 +1,11 @@
+{
+  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "embedding_dimension": 384,
+  "normalize_embeddings": true,
+  "faiss_index": "faiss_index/index.faiss",
+  "metadata_file": "metadata/metadata.json",
+  "chunk_size": 700,
+  "chunk_overlap": 120,
+  "faiss_index_type": "IndexFlatIP",
+  "created_at_utc": "2026-09-24T06:39:52.158179+00:00"
+}
