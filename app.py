@@ -10,7 +10,7 @@ from sentence_transformers import SentenceTransformer
 
 
 # ============================================================
-# CONFIGURATION
+# APPLICATION CONFIGURATION
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -20,13 +20,15 @@ FAISS_INDEX_PATH = DATA_DIR / "faiss.index"
 METADATA_PATH = DATA_DIR / "metadata.json"
 CONFIG_PATH = DATA_DIR / "config.json"
 
+# Groq model
 GROQ_MODEL = "openai/gpt-oss-20b"
 
+# Number of chunks retrieved for each question
 DEFAULT_TOP_K = 5
 
 
 # ============================================================
-# PAGE CONFIGURATION
+# STREAMLIT PAGE CONFIGURATION
 # ============================================================
 
 st.set_page_config(
@@ -46,49 +48,12 @@ def get_groq_client():
     api_key = os.environ.get("GROQ_API_KEY")
 
     if not api_key:
+
         return None
 
     return OpenAI(
         api_key=api_key,
         base_url="https://api.groq.com/openai/v1",
-    )
-
-
-# ============================================================
-# LOAD CONFIG
-# ============================================================
-
-@st.cache_resource
-def load_config():
-
-    if not CONFIG_PATH.exists():
-        raise FileNotFoundError(
-            f"Configuration file not found: {CONFIG_PATH}"
-        )
-
-    with open(
-        CONFIG_PATH,
-        "r",
-        encoding="utf-8",
-    ) as file:
-
-        return json.load(file)
-
-
-# ============================================================
-# LOAD FAISS INDEX
-# ============================================================
-
-@st.cache_resource
-def load_faiss_index():
-
-    if not FAISS_INDEX_PATH.exists():
-        raise FileNotFoundError(
-            f"FAISS index not found: {FAISS_INDEX_PATH}"
-        )
-
-    return faiss.read_index(
-        str(FAISS_INDEX_PATH)
     )
 
 
@@ -100,8 +65,12 @@ def load_faiss_index():
 def load_metadata():
 
     if not METADATA_PATH.exists():
+
         raise FileNotFoundError(
-            f"Metadata file not found: {METADATA_PATH}"
+            f"Metadata file not found:\n"
+            f"{METADATA_PATH}\n\n"
+            f"Make sure metadata.json exists inside "
+            f"the data/ directory."
         )
 
     with open(
@@ -114,11 +83,178 @@ def load_metadata():
 
 
 # ============================================================
+# LOAD CONFIGURATION
+# ============================================================
+#
+# config.json is OPTIONAL.
+#
+# If config.json exists:
+#       → load it
+#
+# If config.json does not exist:
+#       → derive configuration from metadata.json
+#
+# This prevents deployment failures when config.json
+# was not uploaded to GitHub.
+# ============================================================
+
+@st.cache_resource
+def load_config():
+
+    # --------------------------------------------------------
+    # OPTION 1: config.json exists
+    # --------------------------------------------------------
+
+    if CONFIG_PATH.exists():
+
+        with open(
+            CONFIG_PATH,
+            "r",
+            encoding="utf-8",
+        ) as file:
+
+            return json.load(file)
+
+
+    # --------------------------------------------------------
+    # OPTION 2: derive configuration from metadata.json
+    # --------------------------------------------------------
+
+    if METADATA_PATH.exists():
+
+        with open(
+            METADATA_PATH,
+            "r",
+            encoding="utf-8",
+        ) as file:
+
+            metadata = json.load(file)
+
+
+        records = metadata.get(
+            "records",
+            [],
+        )
+
+
+        # Determine number of documents if it isn't
+        # explicitly stored in metadata.
+
+        unique_files = {
+            record.get("file_name")
+            for record in records
+            if record.get("file_name")
+        }
+
+
+        document_count = metadata.get(
+            "document_count",
+            len(unique_files),
+        )
+
+
+        chunk_count = metadata.get(
+            "chunk_count",
+            len(records),
+        )
+
+
+        embedding_model = metadata.get(
+            "embedding_model",
+            None,
+        )
+
+
+        # The records may contain the embedding model
+        # even if the top-level metadata doesn't.
+
+        if not embedding_model and records:
+
+            embedding_model = records[0].get(
+                "embedding_model"
+            )
+
+
+        # Default to the model used by the Colab
+        # preprocessing pipeline.
+
+        if not embedding_model:
+
+            embedding_model = (
+                "sentence-transformers/"
+                "all-MiniLM-L6-v2"
+            )
+
+
+        return {
+
+            "embedding_model": embedding_model,
+
+            "embedding_dimension": metadata.get(
+                "embedding_dimension",
+                384,
+            ),
+
+            "normalize_embeddings": metadata.get(
+                "normalized_embeddings",
+                True,
+            ),
+
+            "chunk_size": metadata.get(
+                "chunk_size",
+                1000,
+            ),
+
+            "chunk_overlap": metadata.get(
+                "chunk_overlap",
+                150,
+            ),
+
+            "document_count": document_count,
+
+            "chunk_count": chunk_count,
+        }
+
+
+    # --------------------------------------------------------
+    # Neither config nor metadata exists
+    # --------------------------------------------------------
+
+    raise FileNotFoundError(
+        "Neither config.json nor metadata.json "
+        "was found inside the data/ directory."
+    )
+
+
+# ============================================================
+# LOAD FAISS INDEX
+# ============================================================
+
+@st.cache_resource
+def load_faiss_index():
+
+    if not FAISS_INDEX_PATH.exists():
+
+        raise FileNotFoundError(
+            f"FAISS index not found:\n"
+            f"{FAISS_INDEX_PATH}\n\n"
+            f"Make sure faiss.index exists inside "
+            f"the data/ directory."
+        )
+
+    return faiss.read_index(
+        str(FAISS_INDEX_PATH)
+    )
+
+
+# ============================================================
 # LOAD EMBEDDING MODEL
 # ============================================================
 
 @st.cache_resource
-def load_embedding_model(model_name):
+def load_embedding_model(
+    model_name,
+):
 
     return SentenceTransformer(
         model_name
@@ -135,6 +271,18 @@ def create_query_embedding(
     normalize=True,
 ):
 
+    """
+    Converts the user's question into an embedding.
+
+    IMPORTANT:
+    Document embeddings are NOT recreated here.
+
+    Only the user's query is embedded at runtime.
+    """
+
+    # Newer Sentence Transformers versions support
+    # encode_query() for retrieval tasks.
+
     if hasattr(
         model,
         "encode_query",
@@ -147,26 +295,37 @@ def create_query_embedding(
 
     else:
 
+        # Fallback for models/versions that don't
+        # provide encode_query().
+
         embedding = model.encode(
             [query],
             convert_to_numpy=True,
         )
+
 
     embedding = np.asarray(
         embedding,
         dtype=np.float32,
     )
 
+
+    # The document vectors were normalized during
+    # preprocessing. The query must therefore also
+    # be normalized.
+
     if normalize:
+
         faiss.normalize_L2(
             embedding
         )
+
 
     return embedding
 
 
 # ============================================================
-# SEARCH DOCUMENTS
+# SEARCH VECTOR DATABASE
 # ============================================================
 
 def search_documents(
@@ -177,25 +336,51 @@ def search_documents(
     top_k=5,
 ):
 
-    normalized = metadata.get(
+    normalize = metadata.get(
         "normalized_embeddings",
         True,
     )
 
+
+    # --------------------------------------------------------
+    # Convert query to vector
+    # --------------------------------------------------------
+
     query_embedding = create_query_embedding(
         model=model,
         query=query,
-        normalize=normalized,
+        normalize=normalize,
     )
+
+
+    # --------------------------------------------------------
+    # Search FAISS
+    # --------------------------------------------------------
+
+    number_of_results = min(
+        top_k,
+        index.ntotal,
+    )
+
 
     scores, indices = index.search(
         query_embedding,
-        min(top_k, index.ntotal),
+        number_of_results,
     )
 
-    records = metadata["records"]
+
+    # --------------------------------------------------------
+    # Match FAISS positions to metadata
+    # --------------------------------------------------------
+
+    records = metadata.get(
+        "records",
+        [],
+    )
+
 
     results = []
+
 
     for score, index_position in zip(
         scores[0],
@@ -205,29 +390,39 @@ def search_documents(
         if index_position < 0:
             continue
 
+
         if index_position >= len(records):
             continue
+
 
         record = records[
             index_position
         ].copy()
 
+
         record[
             "similarity_score"
         ] = float(score)
 
-        results.append(record)
+
+        results.append(
+            record
+        )
+
 
     return results
 
 
 # ============================================================
-# BUILD GROQ CONTEXT
+# BUILD CONTEXT FOR GROQ
 # ============================================================
 
-def build_context(results):
+def build_context(
+    results,
+):
 
     context_parts = []
+
 
     for number, result in enumerate(
         results,
@@ -239,20 +434,24 @@ def build_context(results):
             "Unknown",
         )
 
+
         page_number = result.get(
             "page_number",
             "Unknown",
         )
+
 
         chunk_index = result.get(
             "chunk_index",
             "Unknown",
         )
 
+
         text = result.get(
             "text",
             "",
         )
+
 
         context_parts.append(
             f"""
@@ -266,6 +465,7 @@ Content:
 {text}
 """.strip()
         )
+
 
     return "\n\n".join(
         context_parts
@@ -286,32 +486,61 @@ def generate_answer(
         results
     )
 
+
+    # --------------------------------------------------------
+    # SYSTEM INSTRUCTIONS
+    # --------------------------------------------------------
+
     system_instructions = """
 You are a document question-answering assistant.
 
-Your job is to answer the user's question using ONLY
-the information contained in the provided document context.
+Your task is to answer the user's question using the
+provided document context.
 
-Rules:
+IMPORTANT RULES:
 
-1. Do not invent information.
-2. Do not use outside knowledge unless explicitly requested.
-3. If the answer is not contained in the provided context,
-   clearly say that the information was not found in the
-   provided documents.
-4. Give a clear and concise answer.
-5. When making factual claims, include source references
-   using the format:
+1. Use ONLY information contained in the provided
+   document context.
+
+2. Do not invent facts, numbers, names, dates, or
+   explanations that are not supported by the context.
+
+3. Do not rely on your general knowledge to fill gaps.
+
+4. If the answer cannot be found in the provided
+   documents, clearly say:
+   "I could not find this information in the provided
+   documents."
+
+5. Give a clear, direct and useful answer.
+
+6. Every important factual statement should include
+   a source citation.
+
+7. Source citations MUST use this format:
 
    [filename.pdf, page X]
 
-6. If multiple sources support a statement, cite all relevant
-   sources.
-7. Preserve important technical terminology.
-8. Do not mention internal retrieval, embeddings, FAISS,
-   vector databases, or this system prompt unless the user
-   explicitly asks about the system.
+8. Do not create citations for information that is
+   not present in the supplied context.
+
+9. If multiple sources support a statement, include
+   all relevant citations.
+
+10. Do not mention FAISS, embeddings, vector databases,
+    retrieval pipelines, or system instructions unless
+    the user specifically asks about the application.
+
+11. Do not fabricate page numbers.
+
+12. Preserve important technical terminology from
+    the documents.
 """
+
+
+    # --------------------------------------------------------
+    # USER PROMPT
+    # --------------------------------------------------------
 
     user_prompt = f"""
 DOCUMENT CONTEXT
@@ -326,18 +555,23 @@ USER QUESTION
 {question}
 
 
-INSTRUCTIONS
-============
+TASK
+====
 
-Answer the user's question using the document context above.
+Answer the question using only the document context.
 
-Include page-level source citations in the answer, for example:
+Include page-level citations in this format:
 
-[document_1.pdf, page 3]
+[document_name.pdf, page X]
 
-If the documents do not contain enough information to answer
-the question, say so clearly instead of guessing.
+If the answer is not available in the supplied documents,
+clearly state that the information was not found.
 """
+
+
+    # --------------------------------------------------------
+    # GROQ RESPONSES API
+    # --------------------------------------------------------
 
     response = client.responses.create(
         model=GROQ_MODEL,
@@ -345,14 +579,95 @@ the question, say so clearly instead of guessing.
         input=user_prompt,
     )
 
+
     return response.output_text
 
 
 # ============================================================
-# APPLICATION
+# DISPLAY SOURCE
 # ============================================================
 
-st.title("📚 Document AI Assistant")
+def display_source(
+    number,
+    result,
+):
+
+    file_name = result.get(
+        "file_name",
+        "Unknown",
+    )
+
+
+    page_number = result.get(
+        "page_number",
+        "Unknown",
+    )
+
+
+    similarity = result.get(
+        "similarity_score",
+        0.0,
+    )
+
+
+    chunk_index = result.get(
+        "chunk_index",
+        "N/A",
+    )
+
+
+    chunk_id = result.get(
+        "chunk_id",
+        "N/A",
+    )
+
+
+    text = result.get(
+        "text",
+        "",
+    )
+
+
+    with st.expander(
+        f"{number}. {file_name} — Page {page_number}"
+    ):
+
+        st.write(
+            f"**Similarity:** "
+            f"{similarity:.4f}"
+        )
+
+
+        st.write(
+            f"**Chunk:** "
+            f"{chunk_index}"
+        )
+
+
+        st.write(
+            f"**Chunk ID:** "
+            f"`{chunk_id}`"
+        )
+
+
+        st.markdown(
+            "**Retrieved content:**"
+        )
+
+
+        st.write(
+            text
+        )
+
+
+# ============================================================
+# APPLICATION START
+# ============================================================
+
+st.title(
+    "📚 Document AI Assistant"
+)
+
 
 st.caption(
     "Ask questions about the pre-processed document collection."
@@ -360,26 +675,32 @@ st.caption(
 
 
 # ============================================================
-# LOAD DATABASE
+# INITIALIZE APPLICATION
 # ============================================================
 
 try:
 
-    config = load_config()
-
-    index = load_faiss_index()
-
     metadata = load_metadata()
 
-    embedding_model_name = config[
-        "embedding_model"
-    ]
+    config = load_config()
+
+    faiss_index = load_faiss_index()
+
+
+    embedding_model_name = config.get(
+        "embedding_model",
+        "sentence-transformers/"
+        "all-MiniLM-L6-v2",
+    )
+
 
     embedding_model = load_embedding_model(
         embedding_model_name
     )
 
+
     groq_client = get_groq_client()
+
 
 except Exception as error:
 
@@ -387,7 +708,11 @@ except Exception as error:
         "Failed to initialize the application."
     )
 
-    st.exception(error)
+
+    st.exception(
+        error
+    )
+
 
     st.stop()
 
@@ -402,10 +727,12 @@ if groq_client is None:
         "GROQ_API_KEY is not configured."
     )
 
+
     st.info(
-        "Set the GROQ_API_KEY environment variable "
-        "before running the application."
+        "Configure GROQ_API_KEY in your deployment "
+        "environment or Streamlit secrets."
     )
+
 
     st.stop()
 
@@ -416,35 +743,71 @@ if groq_client is None:
 
 with st.sidebar:
 
-    st.header("📊 Database")
-
-    st.write(
-        f"**Documents:** "
-        f"{metadata.get('document_count', 'N/A')}"
+    st.header(
+        "📊 Knowledge Base"
     )
 
-    st.write(
-        f"**Chunks:** "
-        f"{metadata.get('chunk_count', 'N/A')}"
+
+    document_count = metadata.get(
+        "document_count",
+        config.get(
+            "document_count",
+            "N/A",
+        ),
     )
 
-    st.write(
-        f"**Embedding model:** "
-        f"{metadata.get('embedding_model', 'N/A')}"
+
+    chunk_count = metadata.get(
+        "chunk_count",
+        config.get(
+            "chunk_count",
+            "N/A",
+        ),
     )
+
+
+    embedding_dimension = metadata.get(
+        "embedding_dimension",
+        config.get(
+            "embedding_dimension",
+            "N/A",
+        ),
+    )
+
+
+    st.write(
+        f"**Documents:** {document_count}"
+    )
+
+
+    st.write(
+        f"**Chunks:** {chunk_count}"
+    )
+
 
     st.write(
         f"**Embedding dimensions:** "
-        f"{metadata.get('embedding_dimension', 'N/A')}"
+        f"{embedding_dimension}"
     )
 
+
+    st.write(
+        f"**LLM:** {GROQ_MODEL}"
+    )
+
+
     st.divider()
+
 
     top_k = st.slider(
         "Retrieved chunks",
         min_value=1,
         max_value=10,
         value=DEFAULT_TOP_K,
+        help=(
+            "Number of document chunks retrieved "
+            "before sending context to the LLM."
+        ),
     )
 
 
@@ -455,9 +818,10 @@ with st.sidebar:
 question = st.text_area(
     "Ask a question",
     placeholder=(
-        "Ask something about the documents..."
+        "Example: What are the main objectives "
+        "described in the documents?"
     ),
-    height=100,
+    height=120,
 )
 
 
@@ -472,7 +836,15 @@ ask_button = st.button(
 )
 
 
+# ============================================================
+# PROCESS QUESTION
+# ============================================================
+
 if ask_button:
+
+    # --------------------------------------------------------
+    # Validate question
+    # --------------------------------------------------------
 
     if not question.strip():
 
@@ -488,22 +860,41 @@ if ask_button:
     # --------------------------------------------------------
 
     with st.spinner(
-        "Searching the documents..."
+        "Searching the document collection..."
     ):
 
-        results = search_documents(
-            query=question,
-            model=embedding_model,
-            index=index,
-            metadata=metadata,
-            top_k=top_k,
-        )
+        try:
 
+            results = search_documents(
+                query=question,
+                model=embedding_model,
+                index=faiss_index,
+                metadata=metadata,
+                top_k=top_k,
+            )
+
+        except Exception as error:
+
+            st.error(
+                "Document search failed."
+            )
+
+            st.exception(
+                error
+            )
+
+            st.stop()
+
+
+    # --------------------------------------------------------
+    # NO RESULTS
+    # --------------------------------------------------------
 
     if not results:
 
         st.warning(
-            "No relevant information was found."
+            "No relevant information was found "
+            "in the document collection."
         )
 
         st.stop()
@@ -528,10 +919,12 @@ if ask_button:
         except Exception as error:
 
             st.error(
-                "Groq API request failed."
+                "The Groq API request failed."
             )
 
-            st.exception(error)
+            st.exception(
+                error
+            )
 
             st.stop()
 
@@ -540,7 +933,10 @@ if ask_button:
     # DISPLAY ANSWER
     # --------------------------------------------------------
 
-    st.subheader("Answer")
+    st.subheader(
+        "Answer"
+    )
+
 
     st.markdown(
         answer
@@ -548,57 +944,23 @@ if ask_button:
 
 
     # --------------------------------------------------------
-    # DISPLAY RETRIEVED SOURCES
+    # DISPLAY SOURCES
     # --------------------------------------------------------
 
     st.divider()
 
+
     st.subheader(
-        "📖 Retrieved Sources"
+        "📖 Sources"
     )
+
 
     for number, result in enumerate(
         results,
         start=1,
     ):
 
-        file_name = result.get(
-            "file_name",
-            "Unknown",
+        display_source(
+            number,
+            result,
         )
-
-        page_number = result.get(
-            "page_number",
-            "Unknown",
-        )
-
-        similarity = result.get(
-            "similarity_score",
-            0.0,
-        )
-
-        with st.expander(
-            f"{number}. {file_name} — Page {page_number}"
-        ):
-
-            st.write(
-                f"**Similarity:** "
-                f"{similarity:.4f}"
-            )
-
-            st.write(
-                f"**Chunk:** "
-                f"{result.get('chunk_index', 'N/A')}"
-            )
-
-            st.write(
-                f"**Chunk ID:** "
-                f"`{result.get('chunk_id', 'N/A')}`"
-            )
-
-            st.write(
-                result.get(
-                    "text",
-                    "",
-                )
-            )
