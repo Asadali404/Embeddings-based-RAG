@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Logs
+*.log
+
+# Original documents
+*.pdf
+*.PDF
+source_pdfs/
+documents/
+pdfs/
+
+# Temporary processing files
+pdf_embedding_workspace/
+embedding_workspace/
+
+# Local caches
+.cache/
